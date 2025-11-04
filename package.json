@@ -1,0 +1,39 @@
+{
+  "name": "memory-mcp-server",
+  "version": "0.1.0",
+  "description": "A Model Context Protocol server providing dynamic short-term and long-term memory management with Chinese language support",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "memory-mcp-server": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "memory",
+    "nlp",
+    "chinese",
+    "jieba",
+    "ai",
+    "llm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@node-rs/jieba": "^1.10.3",
+    "vm2": "^3.9.19",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+

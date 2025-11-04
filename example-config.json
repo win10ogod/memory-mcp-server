@@ -1,0 +1,15 @@
+{
+  "_comment": "Example MCP configuration for Claude Desktop",
+  "mcpServers": {
+    "memory": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/memory-mcp-server/src/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}
+
