@@ -2,6 +2,10 @@
 
 A Model Context Protocol (MCP) server providing dynamic short-term and long-term memory management with Chinese language support.
 
+<a href="https://glama.ai/mcp/servers/@win10ogod/memory-mcp-server">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@win10ogod/memory-mcp-server/badge" alt="Memory Server MCP server" />
+</a>
+
 ## Overview
 
 This MCP server implements a sophisticated memory system extracted from the GentianAphrodite project, offering:
@@ -267,4 +271,3 @@ MIT
 ## Credits
 
 Extracted and generalized from the [GentianAphrodite](https://github.com/steve02081504/GentianAphrodite) project.
-
