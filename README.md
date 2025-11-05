@@ -266,7 +266,7 @@ npm start
 
 ## License
 
-MIT
+BSD-3-Clause license
 
 ## Credits
 
