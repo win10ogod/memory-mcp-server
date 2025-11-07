@@ -46,10 +46,64 @@ export class ShortTermMemoryManager {
    * @param {Array} memories - 记忆数组
    */
   loadMemories(memories) {
-    this.memories = memories.map(mem => ({
-      ...mem,
-      time_stamp: new Date(mem.time_stamp)
-    }));
+    if (!Array.isArray(memories)) {
+      console.warn('[ShortTermMemory] Expected memories to be an array when loading, received:', typeof memories);
+      this.memories = [];
+      return;
+    }
+
+    const normalizedMemories = [];
+
+    memories.forEach((mem, index) => {
+      if (!mem || typeof mem !== 'object') {
+        console.warn(`[ShortTermMemory] Skipping memory #${index}: invalid entry`);
+        return;
+      }
+
+      const text = typeof mem.text === 'string' ? mem.text : '';
+      if (!text.trim()) {
+        console.warn(`[ShortTermMemory] Skipping memory #${index}: missing text content`);
+        return;
+      }
+
+      let timeStampSource = mem.time_stamp ?? mem.timestamp ?? mem.timeStamp;
+      let parsedTimestamp = timeStampSource ? new Date(timeStampSource) : new Date();
+      if (!(parsedTimestamp instanceof Date) || Number.isNaN(parsedTimestamp.getTime())) {
+        console.warn(`[ShortTermMemory] Memory #${index} has invalid timestamp, defaulting to current time`);
+        parsedTimestamp = new Date();
+      }
+
+      let keywords = [];
+      if (Array.isArray(mem.keywords)) {
+        keywords = mem.keywords
+          .map((kw, kwIndex) => {
+            if (!kw || typeof kw.word !== 'string') {
+              console.warn(`[ShortTermMemory] Memory #${index} keyword #${kwIndex} is invalid, skipping`);
+              return null;
+            }
+
+            const weight = Number.isFinite(kw.weight) ? kw.weight : 1;
+            return { word: kw.word, weight };
+          })
+          .filter(Boolean);
+      } else {
+        console.warn(`[ShortTermMemory] Memory #${index} missing keywords array, defaulting to empty list`);
+      }
+
+      const score = Number.isFinite(mem.score) ? mem.score : 0;
+      const conversationId = typeof mem.conversation_id === 'string' ? mem.conversation_id : 'default';
+
+      normalizedMemories.push({
+        ...mem,
+        text,
+        keywords,
+        score,
+        conversation_id: conversationId,
+        time_stamp: parsedTimestamp
+      });
+    });
+
+    this.memories = normalizedMemories;
   }
 
   /**
@@ -100,24 +154,33 @@ export class ShortTermMemoryManager {
     let relevanceScore = 0;
 
     // 关键词匹配分数
-    const memoryKeywordsSet = new Set(memory.keywords.map(kw => kw.word));
+    const memoryKeywordsArray = Array.isArray(memory.keywords)
+      ? memory.keywords.filter(kw => kw && typeof kw.word === 'string')
+      : [];
+    const memoryKeywordMap = new Map();
+    for (const kw of memoryKeywordsArray) {
+      memoryKeywordMap.set(kw.word, kw);
+    }
+    const memoryKeywordsSet = new Set(memoryKeywordMap.keys());
     let keywordMatchScore = 0;
-    
+
     for (const currentKw of currentKeywords) {
       if (memoryKeywordsSet.has(currentKw.word)) {
-        const memoryKw = memory.keywords.find(mk => mk.word === currentKw.word);
+        const memoryKw = memoryKeywordMap.get(currentKw.word);
         keywordMatchScore += currentKw.weight + (memoryKw?.weight || 0);
       }
     }
     relevanceScore += keywordMatchScore;
 
     // 时间衰减惩罚
-    const timeDiff = Math.max(0, currentTimeStamp - (memory.time_stamp?.getTime() || 0));
+    const memoryTime = memory.time_stamp instanceof Date ? memory.time_stamp.getTime() : 0;
+    const timeDiff = Math.max(0, currentTimeStamp - (Number.isFinite(memoryTime) ? memoryTime : 0));
     const timePenalty = MAX_TIME_PENALTY * (1 - Math.exp(-timeDiff * TIME_DECAY_FACTOR_EXP));
     relevanceScore -= timePenalty;
 
     // 加上记忆自身分数
-    relevanceScore += memory.score;
+    const memoryScore = Number.isFinite(memory.score) ? memory.score : 0;
+    relevanceScore += memoryScore;
 
     return relevanceScore;
   }

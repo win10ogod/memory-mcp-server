@@ -22,6 +22,7 @@ export function createLongTermTools(memoryManager, storageManager) {
         name: z.string().describe('Unique name for the memory'),
         prompt: z.string().describe('The memory content to be recalled when triggered'),
         trigger: z.string().describe('JavaScript code that returns true/false to determine if memory should activate. Example: "match_keys(context.messages, [\'birthday\'], \'any\') || new Date().getMonth() === 6"'),
+        conversation_id: z.string().optional().describe('Conversation ID that owns this memory (defaults to "default")'),
         createdContext: z.string().optional().describe('Optional context about when/why this memory was created'),
         recentMessages: z.array(z.object({
           role: z.enum(['user', 'assistant', 'system']),
@@ -72,6 +73,7 @@ export function createLongTermTools(memoryManager, storageManager) {
         name: z.string().describe('Name of the memory to update'),
         trigger: z.string().optional().describe('New trigger condition (JavaScript code)'),
         prompt: z.string().optional().describe('New memory content'),
+        conversation_id: z.string().optional().describe('Conversation ID that owns this memory'),
         updatedContext: z.string().optional().describe('Context about this update'),
         recentMessages: z.array(z.object({
           role: z.enum(['user', 'assistant', 'system']),
@@ -124,7 +126,8 @@ export function createLongTermTools(memoryManager, storageManager) {
       name: 'delete_long_term_memory',
       description: 'Delete a long-term memory by name.',
       inputSchema: z.object({
-        name: z.string().describe('Name of the memory to delete')
+        name: z.string().describe('Name of the memory to delete'),
+        conversation_id: z.string().optional().describe('Conversation ID that owns this memory')
       }),
       handler: async (args) => {
         try {
@@ -155,7 +158,9 @@ export function createLongTermTools(memoryManager, storageManager) {
     {
       name: 'list_long_term_memories',
       description: 'List all long-term memory names and their basic information.',
-      inputSchema: z.object({}),
+      inputSchema: z.object({
+        conversation_id: z.string().optional().describe('Conversation ID to inspect (defaults to "default")')
+      }),
       handler: async (args) => {
         try {
           const memories = memoryManager.getMemories();
@@ -223,7 +228,8 @@ export function createLongTermTools(memoryManager, storageManager) {
       name: 'get_memory_context',
       description: 'Get the creation and update context of a specific long-term memory.',
       inputSchema: z.object({
-        name: z.string().describe('Name of the memory')
+        name: z.string().describe('Name of the memory'),
+        conversation_id: z.string().optional().describe('Conversation ID that owns this memory')
       }),
       handler: async (args) => {
         try {

@@ -17,6 +17,7 @@ import { LongTermMemoryManager } from './memory/long-term.js';
 import { StorageManager } from './memory/storage.js';
 import { createShortTermTools } from './tools/short-term-tools.js';
 import { createLongTermTools } from './tools/long-term-tools.js';
+import { zodToJsonSchema } from './utils/zod-to-json-schema.js';
 
 // 全局管理器映射（按 conversation_id）
 const shortTermManagers = new Map();
@@ -88,8 +89,8 @@ async function createServer() {
   const toolRegistry = new Map();
 
   // 注册工具的辅助函数
-  function registerTool(toolDef) {
-    toolRegistry.set(toolDef.name, toolDef);
+  function registerTool(toolDef, scope) {
+    toolRegistry.set(toolDef.name, { ...toolDef, scope });
   }
 
   // 动态创建工具（使用默认 conversation_id）
@@ -100,24 +101,18 @@ async function createServer() {
 
   // 注册所有短期记忆工具
   const shortTermTools = createShortTermTools(defaultShortTermManager, defaultStorageManager);
-  shortTermTools.forEach(registerTool);
+  shortTermTools.forEach(tool => registerTool(tool, 'short-term'));
 
   // 注册所有长期记忆工具
   const longTermTools = createLongTermTools(defaultLongTermManager, defaultStorageManager);
-  longTermTools.forEach(registerTool);
+  longTermTools.forEach(tool => registerTool(tool, 'long-term'));
 
   // 处理 list_tools 请求
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools = Array.from(toolRegistry.values()).map(tool => ({
       name: tool.name,
       description: tool.description,
-      inputSchema: {
-        type: 'object',
-        properties: tool.inputSchema.shape || {},
-        required: Object.keys(tool.inputSchema.shape || {}).filter(
-          key => !tool.inputSchema.shape[key].isOptional()
-        )
-      }
+      inputSchema: zodToJsonSchema(tool.inputSchema)
     }));
 
     return { tools };
@@ -146,16 +141,18 @@ async function createServer() {
 
       // 如果工具需要特定的 conversation_id，获取对应的管理器
       const conversationId = validatedArgs.conversation_id || defaultConversationId;
-      
+
+      const toolScope = toolDef.scope;
+
       let manager, storage;
-      if (toolName.includes('short_term')) {
+      if (toolScope === 'short-term' || toolName.includes('short_term')) {
         manager = await getShortTermManager(conversationId);
         storage = getStorageManager(conversationId);
         // 重新创建工具以使用正确的管理器
         const tools = createShortTermTools(manager, storage);
         const tool = tools.find(t => t.name === toolName);
         const result = await tool.handler(validatedArgs);
-        
+
         return {
           content: [
             {
@@ -164,14 +161,14 @@ async function createServer() {
             }
           ]
         };
-      } else if (toolName.includes('long_term')) {
+      } else if (toolScope === 'long-term' || toolName.includes('long_term')) {
         manager = await getLongTermManager(conversationId);
         storage = getStorageManager(conversationId);
         // 重新创建工具以使用正确的管理器
         const tools = createLongTermTools(manager, storage);
         const tool = tools.find(t => t.name === toolName);
         const result = await tool.handler(validatedArgs);
-        
+
         return {
           content: [
             {
@@ -228,7 +225,7 @@ async function main() {
   try {
     const server = await createServer();
     const transport = new StdioServerTransport();
-    
+
     await server.connect(transport);
     
     console.error('Memory MCP Server running on stdio');
@@ -240,4 +237,6 @@ async function main() {
 }
 
 main();
+
+export { createServer };
 
