@@ -4,6 +4,7 @@
  */
 
 import { evaluateTrigger, testTrigger } from '../triggers/matcher.js';
+import { normalizeModalities } from './modalities.js';
 
 /**
  * 长期记忆管理器
@@ -18,11 +19,39 @@ export class LongTermMemoryManager {
    * @param {Array} memories - 记忆数组
    */
   loadMemories(memories) {
-    this.memories = memories.map(mem => ({
-      ...mem,
-      createdAt: new Date(mem.createdAt),
-      updatedAt: mem.updatedAt ? new Date(mem.updatedAt) : undefined
-    }));
+    if (!Array.isArray(memories)) {
+      this.memories = [];
+      return;
+    }
+
+    this.memories = memories
+      .filter(mem => mem && typeof mem === 'object')
+      .map(mem => {
+        const createdAtSource = mem.createdAt ?? mem.created_at;
+        let createdAt = createdAtSource ? new Date(createdAtSource) : new Date();
+        if (!(createdAt instanceof Date) || Number.isNaN(createdAt.getTime())) {
+          createdAt = new Date();
+        }
+
+        const updatedAtSource = mem.updatedAt ?? mem.updated_at;
+        let updatedAt;
+        if (updatedAtSource) {
+          const parsedUpdated = new Date(updatedAtSource);
+          if (parsedUpdated instanceof Date && !Number.isNaN(parsedUpdated.getTime())) {
+            updatedAt = parsedUpdated;
+          }
+        }
+
+        const modalities = normalizeModalities(mem.modalities ?? mem.attachments ?? []);
+
+        return {
+          ...mem,
+          createdAt,
+          updatedAt,
+          modalities,
+          attachments: modalities
+        };
+      });
   }
 
   /**
@@ -60,12 +89,24 @@ export class LongTermMemoryManager {
    * @returns {Promise<{activated: Array, random: Array}>}
    */
   async searchAndActivateMemories(context) {
+    context = context || {};
+
     const activatedMemories = [];
+
+    const normalizedContextModalities = normalizeModalities(context?.modalities ?? context?.attachments ?? []);
+    const evaluationContext = {
+      ...context,
+      modalities: normalizedContextModalities
+    };
+
+    if ('attachments' in evaluationContext || normalizedContextModalities.length > 0) {
+      evaluationContext.attachments = normalizedContextModalities;
+    }
 
     // 评估所有记忆的触发条件
     for (const memory of this.memories) {
       try {
-        const triggered = await evaluateTrigger(memory.trigger, context);
+        const triggered = await evaluateTrigger(memory.trigger, evaluationContext);
         if (triggered) {
           activatedMemories.push(memory);
         }
@@ -137,12 +178,16 @@ export class LongTermMemoryManager {
     }
 
     // 添加新记忆
+    const modalities = normalizeModalities(memory.modalities ?? memory.attachments ?? []);
+
     this.memories.push({
       trigger: memory.trigger,
       prompt: memory.prompt,
       name: memory.name,
       createdAt: new Date(),
-      createdContext: memory.createdContext || ''
+      createdContext: memory.createdContext || '',
+      modalities,
+      attachments: modalities
     });
 
     return { success: true };
@@ -184,6 +229,12 @@ export class LongTermMemoryManager {
     if (updates.trigger !== undefined) memory.trigger = updates.trigger;
     if (updates.prompt !== undefined) memory.prompt = updates.prompt;
     if (updates.updatedContext !== undefined) memory.updatedContext = updates.updatedContext;
+
+    if (updates.modalities !== undefined || updates.attachments !== undefined) {
+      const modalities = normalizeModalities(updates.modalities ?? updates.attachments ?? []);
+      memory.modalities = modalities;
+      memory.attachments = modalities;
+    }
     
     memory.updatedAt = new Date();
 

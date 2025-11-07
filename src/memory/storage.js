@@ -6,6 +6,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { prepareModalitiesForStorage } from './modalities.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,7 +56,7 @@ export async function saveJsonFile(filePath, data) {
   try {
     // 确保目录存在
     await ensureDir(path.dirname(filePath));
-    
+
     // 序列化并保存
     const content = JSON.stringify(data, null, 2);
     await fs.writeFile(filePath, content, 'utf-8');
@@ -63,6 +64,71 @@ export async function saveJsonFile(filePath, data) {
     console.error(`Error saving JSON file ${filePath}:`, error);
     throw error;
   }
+}
+
+function stripEphemeralFields(object) {
+  if (!object || typeof object !== 'object') {
+    return;
+  }
+
+  for (const key of Object.keys(object)) {
+    if (key.startsWith('_')) {
+      delete object[key];
+    }
+  }
+}
+
+function normalizeDateLike(value) {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  return value;
+}
+
+function prepareShortTermMemoryForStorage(memory) {
+  const sanitized = { ...memory };
+
+  stripEphemeralFields(sanitized);
+
+  sanitized.time_stamp = normalizeDateLike(sanitized.time_stamp);
+  if (sanitized.timestamp !== undefined) {
+    sanitized.timestamp = normalizeDateLike(sanitized.timestamp);
+  }
+  if (sanitized.timeStamp !== undefined) {
+    sanitized.timeStamp = normalizeDateLike(sanitized.timeStamp);
+  }
+
+  if (Array.isArray(memory.keywords)) {
+    sanitized.keywords = memory.keywords
+      .filter(kw => kw && typeof kw.word === 'string')
+      .map(kw => ({
+        word: kw.word,
+        weight: Number.isFinite(kw.weight) ? kw.weight : 1
+      }));
+  }
+
+  const modalities = prepareModalitiesForStorage(memory.modalities ?? memory.attachments ?? []);
+  sanitized.modalities = modalities;
+  sanitized.attachments = modalities;
+
+  return sanitized;
+}
+
+function prepareLongTermMemoryForStorage(memory) {
+  const sanitized = { ...memory };
+
+  stripEphemeralFields(sanitized);
+
+  sanitized.createdAt = normalizeDateLike(sanitized.createdAt);
+  if (sanitized.updatedAt !== undefined) {
+    sanitized.updatedAt = normalizeDateLike(sanitized.updatedAt);
+  }
+
+  const modalities = prepareModalitiesForStorage(memory.modalities ?? memory.attachments ?? []);
+  sanitized.modalities = modalities;
+  sanitized.attachments = modalities;
+
+  return sanitized;
 }
 
 /**
@@ -118,7 +184,10 @@ export class StorageManager {
    * @param {Array} memories
    */
   async saveShortTermMemories(memories) {
-    await saveJsonFile(this.getShortTermPath(), memories);
+    const dataToSave = Array.isArray(memories)
+      ? memories.map(prepareShortTermMemoryForStorage)
+      : [];
+    await saveJsonFile(this.getShortTermPath(), dataToSave);
   }
 
   /**
@@ -134,7 +203,10 @@ export class StorageManager {
    * @param {Array} memories
    */
   async saveLongTermMemories(memories) {
-    await saveJsonFile(this.getLongTermPath(), memories);
+    const dataToSave = Array.isArray(memories)
+      ? memories.map(prepareLongTermMemoryForStorage)
+      : [];
+    await saveJsonFile(this.getLongTermPath(), dataToSave);
   }
 
   /**

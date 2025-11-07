@@ -5,6 +5,7 @@
 
 import { extractKeywords } from '../nlp/jieba.js';
 import { createContextSnapshot } from '../nlp/keywords.js';
+import { normalizeModalities } from './modalities.js';
 
 // --- 常量定义 ---
 const RELEVANCE_THRESHOLD = 5;      // 激活相关记忆的阈值
@@ -31,6 +32,155 @@ const MIN_TIME_DIFFERENCE_SAME_CONVERSATION_MS = 20 * 60 * 1000; // 20分钟
 const MAX_TOP_RELEVANT = 2; // 最多选几条最相关
 const MAX_NEXT_RELEVANT = 1; // 最多选几条次相关
 const MAX_RANDOM_FLASHBACK = 2; // 最多选几条随机
+
+const TRANSCRIPT_KEYWORD_WEIGHT = 0.6;
+const MAX_TRANSCRIPT_KEYWORDS = 24;
+
+function getModalityEmbedding(modality) {
+  if (!modality || typeof modality !== 'object') {
+    return null;
+  }
+
+  const features = modality.features;
+  if (!features || typeof features !== 'object') {
+    return null;
+  }
+
+  const candidates = [features.embedding, features.vector, features.featureVector];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.every(value => Number.isFinite(value))) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function cosineSimilarity(vecA, vecB) {
+  if (!Array.isArray(vecA) || !Array.isArray(vecB)) {
+    return 0;
+  }
+
+  const length = Math.min(vecA.length, vecB.length);
+  if (length === 0) {
+    return 0;
+  }
+
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  let usedDimensions = 0;
+
+  for (let i = 0; i < length; i++) {
+    const a = Number(vecA[i]);
+    const b = Number(vecB[i]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      continue;
+    }
+    dot += a * b;
+    magA += a * a;
+    magB += b * b;
+    usedDimensions++;
+  }
+
+  if (usedDimensions === 0 || magA === 0 || magB === 0) {
+    return 0;
+  }
+
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+function collectModalityKeywords(modalities) {
+  const collected = [];
+
+  if (!Array.isArray(modalities)) {
+    return collected;
+  }
+
+  for (const modality of modalities) {
+    if (!modality || typeof modality !== 'object') {
+      continue;
+    }
+
+    const keywordSources = [];
+
+    if (Array.isArray(modality.keywords)) {
+      keywordSources.push(...modality.keywords);
+    }
+
+    if (modality.features && typeof modality.features === 'object') {
+      const featureKeywords = modality.features.keywords || modality.features.tags;
+      if (Array.isArray(featureKeywords)) {
+        keywordSources.push(...featureKeywords);
+      }
+    }
+
+    for (const kw of keywordSources) {
+      if (typeof kw === 'string') {
+        collected.push({ word: kw, weight: 1 });
+      } else if (kw && typeof kw === 'object') {
+        const word = typeof kw.word === 'string'
+          ? kw.word
+          : (typeof kw.term === 'string' ? kw.term : null);
+        if (!word) {
+          continue;
+        }
+        const weight = Number.isFinite(kw.weight)
+          ? kw.weight
+          : (Number.isFinite(kw.score) ? kw.score : 1);
+        collected.push({ word, weight });
+      }
+    }
+
+    if (typeof modality.transcript === 'string' && modality.transcript.trim()) {
+      const extracted = extractKeywords(modality.transcript, MAX_TRANSCRIPT_KEYWORDS);
+      for (const kw of extracted) {
+        collected.push({ word: kw.word, weight: kw.weight * TRANSCRIPT_KEYWORD_WEIGHT });
+      }
+    }
+  }
+
+  return collected;
+}
+
+function calculateModalityVectorScore(memoryModalities, queryModalities) {
+  if (!Array.isArray(memoryModalities) || !Array.isArray(queryModalities) || !memoryModalities.length || !queryModalities.length) {
+    return 0;
+  }
+
+  let totalScore = 0;
+  let comparisons = 0;
+
+  for (const memoryModality of memoryModalities) {
+    const memoryEmbedding = getModalityEmbedding(memoryModality);
+    if (!memoryEmbedding) {
+      continue;
+    }
+
+    for (const queryModality of queryModalities) {
+      if (queryModality.type && memoryModality.type && queryModality.type !== memoryModality.type) {
+        continue;
+      }
+
+      const queryEmbedding = getModalityEmbedding(queryModality);
+      if (!queryEmbedding) {
+        continue;
+      }
+
+      const similarity = cosineSimilarity(memoryEmbedding, queryEmbedding);
+      if (Number.isFinite(similarity)) {
+        totalScore += similarity;
+        comparisons++;
+      }
+    }
+  }
+
+  if (comparisons === 0) {
+    return 0;
+  }
+
+  return totalScore / comparisons;
+}
 
 /**
  * 短期记忆管理器
@@ -93,13 +243,17 @@ export class ShortTermMemoryManager {
       const score = Number.isFinite(mem.score) ? mem.score : 0;
       const conversationId = typeof mem.conversation_id === 'string' ? mem.conversation_id : 'default';
 
+      const modalities = normalizeModalities(mem.modalities ?? mem.attachments ?? []);
+
       normalizedMemories.push({
         ...mem,
         text,
         keywords,
         score,
         conversation_id: conversationId,
-        time_stamp: parsedTimestamp
+        time_stamp: parsedTimestamp,
+        modalities,
+        attachments: modalities
       });
     });
 
@@ -150,25 +304,49 @@ export class ShortTermMemoryManager {
    * @param {number} currentTimeStamp - 当前时间戳
    * @returns {number} 相关性分数
    */
-  calculateRelevance(memory, currentKeywords, currentTimeStamp) {
+  calculateRelevance(memory, currentKeywords, currentTimeStamp, options = {}) {
     let relevanceScore = 0;
+
+    const queryModalities = Array.isArray(options.queryModalities)
+      ? options.queryModalities
+      : normalizeModalities(options.attachments ?? []);
+
+    const memoryModalities = Array.isArray(memory.modalities)
+      ? memory.modalities
+      : (Array.isArray(memory.attachments) ? normalizeModalities(memory.attachments) : []);
 
     // 关键词匹配分数
     const memoryKeywordsArray = Array.isArray(memory.keywords)
       ? memory.keywords.filter(kw => kw && typeof kw.word === 'string')
       : [];
+    const modalityKeywords = collectModalityKeywords(memoryModalities);
     const memoryKeywordMap = new Map();
-    for (const kw of memoryKeywordsArray) {
-      memoryKeywordMap.set(kw.word, kw);
+    for (const kw of [...memoryKeywordsArray, ...modalityKeywords]) {
+      if (!kw || typeof kw.word !== 'string') {
+        continue;
+      }
+      const baseWeight = Number.isFinite(kw.weight) ? kw.weight : 1;
+      const existing = memoryKeywordMap.get(kw.word);
+      if (existing) {
+        existing.weight += baseWeight;
+      } else {
+        memoryKeywordMap.set(kw.word, { word: kw.word, weight: baseWeight });
+      }
     }
-    const memoryKeywordsSet = new Set(memoryKeywordMap.keys());
+
     let keywordMatchScore = 0;
 
     for (const currentKw of currentKeywords) {
-      if (memoryKeywordsSet.has(currentKw.word)) {
-        const memoryKw = memoryKeywordMap.get(currentKw.word);
-        keywordMatchScore += currentKw.weight + (memoryKw?.weight || 0);
+      if (!currentKw || typeof currentKw.word !== 'string') {
+        continue;
       }
+      if (!memoryKeywordMap.has(currentKw.word)) {
+        continue;
+      }
+      const memoryKw = memoryKeywordMap.get(currentKw.word);
+      const currentWeight = Number.isFinite(currentKw.weight) ? currentKw.weight : 1;
+      const memoryWeight = Number.isFinite(memoryKw?.weight) ? memoryKw.weight : 0;
+      keywordMatchScore += currentWeight + memoryWeight;
     }
     relevanceScore += keywordMatchScore;
 
@@ -181,6 +359,15 @@ export class ShortTermMemoryManager {
     // 加上记忆自身分数
     const memoryScore = Number.isFinite(memory.score) ? memory.score : 0;
     relevanceScore += memoryScore;
+
+    // 模态向量相似度
+    const vectorScore = calculateModalityVectorScore(memoryModalities, queryModalities);
+    if (Number.isFinite(vectorScore) && vectorScore !== 0) {
+      const vectorWeight = Number.isFinite(options.modalityVectorWeight)
+        ? options.modalityVectorWeight
+        : 10;
+      relevanceScore += vectorScore * vectorWeight;
+    }
 
     return relevanceScore;
   }
@@ -226,15 +413,24 @@ export class ShortTermMemoryManager {
    */
   async searchRelevantMemories(recentMessages, conversationId, options = {}) {
     const currentTimeStamp = Date.now();
-    
+
+    const queryModalities = normalizeModalities(options.queryModalities ?? options.attachments ?? []);
+
     // 提取当前对话的关键词
-    const currentKeywords = await this.extractMessageKeywords(recentMessages, options.roleWeights);
+    const messageKeywords = await this.extractMessageKeywords(recentMessages, options.roleWeights);
+    const modalityKeywords = collectModalityKeywords(queryModalities);
+    const currentKeywords = [...messageKeywords, ...modalityKeywords];
+
+    const searchOptions = { ...options, queryModalities };
+    if ('attachments' in searchOptions) {
+      delete searchOptions.attachments;
+    }
 
     // 计算所有记忆的相关性
     const scoredMemories = this.memories
       .map((mem, index) => ({
         memory: mem,
-        relevance: this.calculateRelevance(mem, currentKeywords, currentTimeStamp),
+        relevance: this.calculateRelevance(mem, currentKeywords, currentTimeStamp, searchOptions),
         index
       }))
       .filter(item => item.relevance >= RELEVANCE_THRESHOLD)
@@ -323,7 +519,7 @@ export class ShortTermMemoryManager {
       const selectedRandomItem = this.selectOneWeightedRandom(currentCandidates, weights);
 
       if (selectedRandomItem) {
-        selectedRandomItem.relevance = this.calculateRelevance(selectedRandomItem.memory, currentKeywords, currentTimeStamp);
+        selectedRandomItem.relevance = this.calculateRelevance(selectedRandomItem.memory, currentKeywords, currentTimeStamp, searchOptions);
         finalRandomFlashback.push(selectedRandomItem);
         availableForRandomPool = availableForRandomPool.filter(item => item.index !== selectedRandomItem.index);
       } else {
@@ -366,7 +562,7 @@ export class ShortTermMemoryManager {
 
     // 提取关键词
     const keywords = await this.extractMessageKeywords(messages, options.roleWeights);
-    
+
     // 创建上下文快照
     const contextSnapshot = createContextSnapshot(messages);
 
@@ -377,12 +573,16 @@ export class ShortTermMemoryManager {
 
     // 添加新记忆
     const lastMessage = messages[messages.length - 1];
+    const modalities = normalizeModalities(options.modalities ?? options.attachments ?? []);
+
     this.memories.push({
       time_stamp: new Date(lastMessage.timestamp || Date.now()),
       text: contextSnapshot,
       keywords: keywords,
       score: 0,
-      conversation_id: conversationId
+      conversation_id: conversationId,
+      modalities,
+      attachments: modalities
     });
 
     return true;
@@ -418,7 +618,7 @@ export class ShortTermMemoryManager {
     const failingMemories = [];
 
     for (const mem of this.memories) {
-      const relevance = this.calculateRelevance(mem, [], currentTimeStamp);
+      const relevance = this.calculateRelevance(mem, [], currentTimeStamp, {});
       mem._relevance = relevance;
 
       if (mem.time_stamp.getTime() < oneYearAgo) {
