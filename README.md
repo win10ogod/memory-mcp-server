@@ -132,6 +132,7 @@ Add a permanent memory with a trigger condition.
 - `name` (string): Unique memory name
 - `prompt` (string): Memory content
 - `trigger` (string): JavaScript code for activation condition
+- `conversation_id` (string, optional): Conversation ID to store the memory under (defaults to "default")
 - `createdContext` (string, optional): Context description
 - `recentMessages` (array, optional): Auto-generate context from messages
 
@@ -162,13 +163,21 @@ Update an existing long-term memory.
 - `name` (string): Memory name to update
 - `trigger` (string, optional): New trigger condition
 - `prompt` (string, optional): New content
+- `conversation_id` (string, optional): Conversation ID that owns the memory
 - `updatedContext` (string, optional): Update context
 
 #### `delete_long_term_memory`
 Delete a long-term memory by name.
 
+**Parameters:**
+- `name` (string): Memory name to delete
+- `conversation_id` (string, optional): Conversation ID that owns the memory
+
 #### `list_long_term_memories`
 List all long-term memories with basic info.
+
+**Parameters:**
+- `conversation_id` (string, optional): Conversation ID to inspect (defaults to "default")
 
 #### `search_long_term_memories`
 Search and activate memories based on current context.
@@ -182,6 +191,10 @@ Search and activate memories based on current context.
 
 #### `get_memory_context`
 Get creation and update context of a specific memory.
+
+**Parameters:**
+- `name` (string): Memory name to inspect
+- `conversation_id` (string, optional): Conversation ID that owns the memory
 
 ## Architecture
 
