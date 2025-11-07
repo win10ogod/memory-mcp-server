@@ -90,7 +90,9 @@ export function createShortTermTools(memoryManager, storageManager) {
             timestamp: item.memory.time_stamp.toISOString(),
             score: item.memory.score,
             relevance: item.relevance,
-            keywords: item.memory.keywords.slice(0, 10).map(kw => kw.word)
+            keywords: item.memory.keywords.slice(0, 10).map(kw => kw.word),
+            modalities: item.memory.modalities || [],
+            attachments: item.memory.attachments || []
           });
 
           await storageManager.saveShortTermMemories(memoryManager.getMemories());
