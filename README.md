@@ -24,13 +24,22 @@ This MCP server implements a sophisticated memory system extracted from the Gent
 - 📊 **Relevance Scoring**: Dynamic scoring based on keyword matching, time, and activation history
 - 🎲 **Smart Selection**: Three-tier selection (top relevant, next relevant, random flashback)
 - 🧹 **Auto Cleanup**: Automatic removal of old or irrelevant memories (configurable)
+- 🖼️ **Image Memory**: Optional image embeddings for visual similarity search
 
 ### Long-term Memory
 
 - 🎯 **Trigger Conditions**: JavaScript code execution for flexible memory activation
-- 🔒 **Sandboxed Execution**: Using isolated-vm for secure JS code evaluation
+- 🔒 **Sandboxed Execution**: Using Node.js built-in vm module for secure JS code evaluation
 - 🎰 **Random Recall**: Serendipitous memory activation for context enrichment
 - 📝 **Context Tracking**: Records creation and update contexts
+- 🖼️ **Multimodal Support**: Images, audio, and custom embeddings
+
+### Data Optimization
+
+- 📉 **Space Saving**: 30-40% reduction in storage size
+- 🔄 **Auto Deduplication**: Removes duplicate keywords and images
+- ⏱️ **Timestamp Normalization**: Unified timestamp format (ISO 8601)
+- 🗜️ **Smart Compression**: Eliminates redundant `attachments` field
 
 ## Installation
 
@@ -393,6 +402,48 @@ npm start
 - **LRU Manager Cache**: Automatic cleanup of inactive conversation managers prevents memory leaks
 - **Retry Logic**: File operations automatically retry with exponential backoff on transient errors
 - **Graceful Shutdown**: Pending writes are flushed and resources cleaned up on shutdown signals
+- **Data Deduplication**: Automatic removal of duplicate images and keywords (30-40% space savings)
+- **Timestamp Normalization**: Unified timestamp format eliminates redundancy
+
+## Image Memory Features
+
+The server includes optional image memory capabilities:
+
+- **Image Modalities**: Store images with memories using embeddings, tags, and descriptions
+- **Similarity Search**: Find visually similar memories using cosine similarity on embeddings
+- **Auto Deduplication**: Automatically detect and remove duplicate images (URL or content hash)
+- **Flexible Embeddings**: Support for CLIP, ResNet, or custom image embeddings
+- **Base64 Support**: Handle both URLs and data URI images
+
+**Example:**
+```javascript
+import { createImageModality } from './src/utils/image-processor.js';
+
+const imageMemory = createImageModality({
+  uri: 'https://example.com/photo.jpg',
+  embedding: [0.1, 0.2, 0.3, ...],  // 512-d vector from CLIP/etc
+  tags: ['vacation', 'beach'],
+  description: 'Sunset at the beach'
+});
+
+// Use in memory creation
+await addShortTermMemory(messages, conversationId, {
+  modalities: [imageMemory]
+});
+```
+
+See [docs/IMAGE_MEMORY.md](docs/IMAGE_MEMORY.md) for detailed guide.
+
+## Data Optimization
+
+Built-in data optimization reduces storage by 30-40%:
+
+- **Timestamp Normalization**: `time_stamp`/`timeStamp`/`timestamp` → `timestamp` (ISO 8601)
+- **Remove Redundancy**: `attachments` field removed (use `modalities` only)
+- **Keyword Deduplication**: Case-insensitive merge with max weight retention
+- **Image Deduplication**: Remove duplicate images based on URI or content hash
+
+All optimizations are applied automatically during storage. See [docs/DATA_OPTIMIZATION.md](docs/DATA_OPTIMIZATION.md) for details.
 
 ## License
 

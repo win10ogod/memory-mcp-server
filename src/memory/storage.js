@@ -7,6 +7,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { prepareModalitiesForStorage } from './modalities.js';
+import { optimizeMemory } from '../utils/data-optimizer.js';
+import { deduplicateImageModalities } from '../utils/image-processor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -202,13 +204,13 @@ function prepareShortTermMemoryForStorage(memory) {
 
   stripEphemeralFields(sanitized);
 
-  sanitized.time_stamp = normalizeDateLike(sanitized.time_stamp);
-  if (sanitized.timestamp !== undefined) {
-    sanitized.timestamp = normalizeDateLike(sanitized.timestamp);
+  // 統一時間戳為 timestamp 字段（ISO 字符串）
+  const timeSource = sanitized.time_stamp ?? sanitized.timestamp ?? sanitized.timeStamp;
+  if (timeSource) {
+    sanitized.timestamp = normalizeDateLike(timeSource);
   }
-  if (sanitized.timeStamp !== undefined) {
-    sanitized.timeStamp = normalizeDateLike(sanitized.timeStamp);
-  }
+  delete sanitized.time_stamp;
+  delete sanitized.timeStamp;
 
   if (Array.isArray(memory.keywords)) {
     sanitized.keywords = memory.keywords
@@ -219,11 +221,22 @@ function prepareShortTermMemoryForStorage(memory) {
       }));
   }
 
-  const modalities = prepareModalitiesForStorage(memory.modalities ?? memory.attachments ?? []);
-  sanitized.modalities = modalities;
-  sanitized.attachments = modalities;
+  // 準備 modalities，優先使用 modalities 字段
+  let modalities = prepareModalitiesForStorage(memory.modalities ?? memory.attachments ?? []);
 
-  return sanitized;
+  // 去除重複的圖像
+  modalities = deduplicateImageModalities(modalities);
+
+  // 只保存 modalities，不保存冗餘的 attachments
+  sanitized.modalities = modalities;
+  delete sanitized.attachments;
+
+  // 應用數據優化（去重關鍵詞等）
+  return optimizeMemory(sanitized, {
+    normalizeTimestamps: false, // 已經處理過了
+    removeAttachmentsRedundancy: false, // 已經處理過了
+    deduplicateKeywords: true
+  });
 }
 
 function prepareLongTermMemoryForStorage(memory) {
@@ -231,14 +244,23 @@ function prepareLongTermMemoryForStorage(memory) {
 
   stripEphemeralFields(sanitized);
 
-  sanitized.createdAt = normalizeDateLike(sanitized.createdAt);
-  if (sanitized.updatedAt !== undefined) {
+  // 標準化時間戳
+  if (sanitized.createdAt) {
+    sanitized.createdAt = normalizeDateLike(sanitized.createdAt);
+  }
+  if (sanitized.updatedAt) {
     sanitized.updatedAt = normalizeDateLike(sanitized.updatedAt);
   }
 
-  const modalities = prepareModalitiesForStorage(memory.modalities ?? memory.attachments ?? []);
+  // 準備 modalities，優先使用 modalities 字段
+  let modalities = prepareModalitiesForStorage(memory.modalities ?? memory.attachments ?? []);
+
+  // 去除重複的圖像
+  modalities = deduplicateImageModalities(modalities);
+
+  // 只保存 modalities，不保存冗餘的 attachments
   sanitized.modalities = modalities;
-  sanitized.attachments = modalities;
+  delete sanitized.attachments;
 
   return sanitized;
 }
