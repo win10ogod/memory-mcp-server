@@ -9,7 +9,11 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
-  ListToolsRequestSchema
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { ShortTermMemoryManager } from './memory/short-term.js';
@@ -19,6 +23,8 @@ import { createShortTermTools } from './tools/short-term-tools.js';
 import { createLongTermTools } from './tools/long-term-tools.js';
 import { zodToJsonSchema } from './utils/zod-to-json-schema.js';
 import { LRUCache } from './utils/lru-cache.js';
+import { createResources } from './resources/index.js';
+import { createPrompts } from './prompts/index.js';
 
 // 使用 LRU 缓存管理器实例，防止内存泄漏
 // 最多缓存 100 个对话，30 分钟未使用自动清理
@@ -103,6 +109,8 @@ async function createServer() {
     {
       capabilities: {
         tools: {},
+        resources: {},
+        prompts: {}
       },
     }
   );
@@ -128,6 +136,14 @@ async function createServer() {
   // 注册所有长期记忆工具
   const longTermTools = createLongTermTools(defaultLongTermManager, defaultStorageManager);
   longTermTools.forEach(tool => registerTool(tool, 'long-term'));
+
+  // 創建 Resources 和 Prompts 處理器
+  const { resources, readResource } = createResources(
+    getShortTermManager,
+    getLongTermManager,
+    getStorageManager
+  );
+  const { prompts, getPrompt } = createPrompts();
 
   // 处理 list_tools 请求
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -234,6 +250,40 @@ async function createServer() {
         ],
         isError: true
       };
+    }
+  });
+
+  // 處理 list_resources 請求
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    return { resources };
+  });
+
+  // 處理 read_resource 請求
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const uri = request.params.uri;
+
+    try {
+      return await readResource(uri);
+    } catch (error) {
+      console.error(`Error reading resource ${uri}:`, error);
+      throw error;
+    }
+  });
+
+  // 處理 list_prompts 請求
+  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    return { prompts };
+  });
+
+  // 處理 get_prompt 請求
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    try {
+      return await getPrompt(name, args);
+    } catch (error) {
+      console.error(`Error getting prompt ${name}:`, error);
+      throw error;
     }
   });
 
