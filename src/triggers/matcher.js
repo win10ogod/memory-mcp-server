@@ -1,13 +1,53 @@
 /**
  * 触发条件匹配引擎
- * 使用 vm2 提供沙箱化的 JS 代码执行环境
+ * 使用 Node.js 内置 vm 模块提供沙箱化的 JS 代码执行环境
  */
 
-import { VM } from 'vm2';
+import vm from 'vm';
 import { matchKeys, matchKeysAll } from '../nlp/keywords.js';
 
 // 默认超时时间（毫秒）
 const DEFAULT_TIMEOUT = 1000;
+
+/**
+ * 创建安全的沙箱上下文
+ * @param {Object} context - 用户提供的上下文
+ * @returns {Object} 安全的沙箱上下文
+ */
+function createSafeContext(context = {}) {
+  // 创建一个干净的上下文对象，只包含安全的内置对象
+  const safeContext = {
+    ...context,
+    // 提供安全的内置对象（只读）
+    Date: Date,
+    Math: Math,
+    RegExp: RegExp,
+    JSON: JSON,
+    Array: Array,
+    Object: Object,
+    String: String,
+    Number: Number,
+    Boolean: Boolean,
+    parseInt: parseInt,
+    parseFloat: parseFloat,
+    isNaN: isNaN,
+    isFinite: isFinite,
+    // 明确禁止的对象
+    require: undefined,
+    process: undefined,
+    global: undefined,
+    globalThis: undefined,
+    Buffer: undefined,
+    setTimeout: undefined,
+    setInterval: undefined,
+    setImmediate: undefined,
+    clearTimeout: undefined,
+    clearInterval: undefined,
+    clearImmediate: undefined
+  };
+
+  return safeContext;
+}
 
 /**
  * 在沙箱中执行 JS 代码
@@ -18,27 +58,18 @@ const DEFAULT_TIMEOUT = 1000;
  */
 export async function executeSandboxed(code, context = {}, timeout = DEFAULT_TIMEOUT) {
   try {
-    // 创建 VM2 沙箱
-    const vm = new VM({
-      timeout: timeout,
-      allowAsync: true,
-      sandbox: {
-        ...context,
-        // 注入安全的内置对象
-        Date: Date,
-        Math: Math,
-        RegExp: RegExp,
-        JSON: JSON,
-        Array: Array,
-        Object: Object,
-        String: String,
-        Number: Number,
-        Boolean: Boolean
-      }
-    });
+    // 创建安全的上下文
+    const safeContext = createSafeContext(context);
 
-    // 执行代码
-    const result = vm.run(code);
+    // 创建 VM 上下文
+    const vmContext = vm.createContext(safeContext);
+
+    // 执行代码（带超时）
+    const result = vm.runInContext(code, vmContext, {
+      timeout: timeout,
+      displayErrors: true,
+      breakOnSigint: true
+    });
 
     // 返回结果
     return {

@@ -263,19 +263,28 @@ npm start
 
 ## Security
 
-- **Sandboxed Execution**: Long-term memory triggers run in vm2 sandbox with timeout protection
+- **Sandboxed Execution**: Long-term memory triggers run in Node.js built-in `vm` module sandbox with timeout protection
 - **No File System Access**: Trigger code cannot access filesystem (sandboxed)
 - **No Network Access**: Trigger code cannot make network requests
 - **Timeout Protection**: 1-second execution timeout prevents infinite loops
+- **Secure Context**: Only safe built-in objects are exposed to trigger code
 
-> **Note**: vm2 provides good security for most use cases. For maximum security in production environments, consider running the MCP server in a containerized environment with additional restrictions.
+> **Note**: The built-in `vm` module provides good isolation for most use cases. For maximum security in production environments, consider running the MCP server in a containerized environment with additional restrictions.
 
 ## Limitations
 
 - Memory storage is file-based (JSON), suitable for moderate usage
 - Trigger execution has 1-second timeout
-- Each isolated VM has 32MB memory limit
+- Manager instances cached with LRU (max 100 conversations, 30-min idle timeout)
 - Chinese text processing optimized (may be less optimal for other languages)
+
+## Performance Optimizations
+
+- **Write Caching**: Delayed writes with 1-second batching to reduce disk I/O
+- **Directory Caching**: Directory existence checks are cached to avoid repeated file system calls
+- **LRU Manager Cache**: Automatic cleanup of inactive conversation managers prevents memory leaks
+- **Retry Logic**: File operations automatically retry with exponential backoff on transient errors
+- **Graceful Shutdown**: Pending writes are flushed and resources cleaned up on shutdown signals
 
 ## License
 

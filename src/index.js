@@ -14,15 +14,28 @@ import {
 
 import { ShortTermMemoryManager } from './memory/short-term.js';
 import { LongTermMemoryManager } from './memory/long-term.js';
-import { StorageManager } from './memory/storage.js';
+import { StorageManager, flushAllWrites } from './memory/storage.js';
 import { createShortTermTools } from './tools/short-term-tools.js';
 import { createLongTermTools } from './tools/long-term-tools.js';
 import { zodToJsonSchema } from './utils/zod-to-json-schema.js';
+import { LRUCache } from './utils/lru-cache.js';
 
-// 全局管理器映射（按 conversation_id）
-const shortTermManagers = new Map();
-const longTermManagers = new Map();
-const storageManagers = new Map();
+// 使用 LRU 缓存管理器实例，防止内存泄漏
+// 最多缓存 100 个对话，30 分钟未使用自动清理
+const shortTermManagers = new LRUCache(100, 30 * 60 * 1000);
+const longTermManagers = new LRUCache(100, 30 * 60 * 1000);
+const storageManagers = new LRUCache(100, 30 * 60 * 1000);
+
+// 定期清理过期的管理器
+setInterval(() => {
+  const stCleaned = shortTermManagers.cleanExpired();
+  const ltCleaned = longTermManagers.cleanExpired();
+  const sCleaned = storageManagers.cleanExpired();
+
+  if (stCleaned > 0 || ltCleaned > 0 || sCleaned > 0) {
+    console.error(`[Cleanup] Removed ${stCleaned} short-term, ${ltCleaned} long-term, ${sCleaned} storage managers`);
+  }
+}, 5 * 60 * 1000); // 每 5 分钟清理一次
 
 /**
  * 获取或创建短期记忆管理器
@@ -30,14 +43,17 @@ const storageManagers = new Map();
  * @returns {Promise<ShortTermMemoryManager>}
  */
 async function getShortTermManager(conversationId) {
-  if (!shortTermManagers.has(conversationId)) {
-    const manager = new ShortTermMemoryManager();
+  let manager = shortTermManagers.get(conversationId);
+
+  if (!manager) {
+    manager = new ShortTermMemoryManager();
     const storage = getStorageManager(conversationId);
     const memories = await storage.loadShortTermMemories();
     manager.loadMemories(memories);
     shortTermManagers.set(conversationId, manager);
   }
-  return shortTermManagers.get(conversationId);
+
+  return manager;
 }
 
 /**
@@ -46,14 +62,17 @@ async function getShortTermManager(conversationId) {
  * @returns {Promise<LongTermMemoryManager>}
  */
 async function getLongTermManager(conversationId) {
-  if (!longTermManagers.has(conversationId)) {
-    const manager = new LongTermMemoryManager();
+  let manager = longTermManagers.get(conversationId);
+
+  if (!manager) {
+    manager = new LongTermMemoryManager();
     const storage = getStorageManager(conversationId);
     const memories = await storage.loadLongTermMemories();
     manager.loadMemories(memories);
     longTermManagers.set(conversationId, manager);
   }
-  return longTermManagers.get(conversationId);
+
+  return manager;
 }
 
 /**
@@ -62,11 +81,14 @@ async function getLongTermManager(conversationId) {
  * @returns {StorageManager}
  */
 function getStorageManager(conversationId) {
-  if (!storageManagers.has(conversationId)) {
-    const manager = new StorageManager(conversationId);
+  let manager = storageManagers.get(conversationId);
+
+  if (!manager) {
+    manager = new StorageManager(conversationId);
     storageManagers.set(conversationId, manager);
   }
-  return storageManagers.get(conversationId);
+
+  return manager;
 }
 
 /**
@@ -219,6 +241,31 @@ async function createServer() {
 }
 
 /**
+ * 优雅关机处理
+ */
+async function gracefulShutdown(signal) {
+  console.error(`\n[${signal}] Shutting down gracefully...`);
+
+  try {
+    // 刷新所有待写入的数据
+    console.error('[Shutdown] Flushing pending writes...');
+    await flushAllWrites();
+
+    // 清理管理器缓存
+    console.error('[Shutdown] Clearing manager caches...');
+    shortTermManagers.clear();
+    longTermManagers.clear();
+    storageManagers.clear();
+
+    console.error('[Shutdown] Cleanup complete');
+    process.exit(0);
+  } catch (error) {
+    console.error('[Shutdown] Error during shutdown:', error);
+    process.exit(1);
+  }
+}
+
+/**
  * 启动服务器
  */
 async function main() {
@@ -227,9 +274,25 @@ async function main() {
     const transport = new StdioServerTransport();
 
     await server.connect(transport);
-    
+
     console.error('Memory MCP Server running on stdio');
     console.error('Server initialized with short-term and long-term memory capabilities');
+
+    // 注册优雅关机处理器
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+
+    // 捕获未处理的异常
+    process.on('uncaughtException', (error) => {
+      console.error('[Fatal] Uncaught exception:', error);
+      gracefulShutdown('uncaughtException');
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      console.error('[Fatal] Unhandled rejection at:', promise, 'reason:', reason);
+      gracefulShutdown('unhandledRejection');
+    });
   } catch (error) {
     console.error('Fatal error starting server:', error);
     process.exit(1);
