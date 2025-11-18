@@ -14,15 +14,42 @@ const __dirname = path.dirname(__filename);
 // 默认存储目录（项目根目录下的 data 文件夹）
 const DEFAULT_DATA_DIR = path.join(__dirname, '../../data');
 
+// 目录存在性缓存，避免重复检查
+const dirExistsCache = new Set();
+
 /**
- * 确保数据目录存在
+ * 确保数据目录存在（带缓存优化）
  * @param {string} dirPath - 目录路径
  */
 async function ensureDir(dirPath) {
+  // 检查缓存
+  if (dirExistsCache.has(dirPath)) {
+    return;
+  }
+
   try {
     await fs.access(dirPath);
-  } catch {
-    await fs.mkdir(dirPath, { recursive: true });
+    // 目录存在，加入缓存
+    dirExistsCache.add(dirPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      // 目录不存在，创建它
+      try {
+        await fs.mkdir(dirPath, { recursive: true });
+        dirExistsCache.add(dirPath);
+      } catch (mkdirError) {
+        // 处理并发创建的竞态条件
+        if (mkdirError.code === 'EEXIST') {
+          dirExistsCache.add(dirPath);
+        } else {
+          // 其他错误则抛出
+          throw mkdirError;
+        }
+      }
+    } else {
+      // 其他访问错误（权限等）
+      throw error;
+    }
   }
 }
 
@@ -47,12 +74,18 @@ export async function loadJsonFileIfExists(filePath, defaultValue = null) {
   }
 }
 
+// 写入缓存和批次处理
+const writeCache = new Map(); // filePath -> { data, timer, dirty }
+const WRITE_DELAY_MS = 1000; // 延迟写入时间（1秒）
+const MAX_RETRIES = 3; // 最大重试次数
+
 /**
- * 保存数据到 JSON 文件
+ * 保存数据到 JSON 文件（带重试机制）
  * @param {string} filePath - 文件路径
  * @param {*} data - 要保存的数据
+ * @param {number} retryCount - 当前重试次数
  */
-export async function saveJsonFile(filePath, data) {
+async function saveJsonFileWithRetry(filePath, data, retryCount = 0) {
   try {
     // 确保目录存在
     await ensureDir(path.dirname(filePath));
@@ -61,9 +94,88 @@ export async function saveJsonFile(filePath, data) {
     const content = JSON.stringify(data, null, 2);
     await fs.writeFile(filePath, content, 'utf-8');
   } catch (error) {
+    if (retryCount < MAX_RETRIES && (error.code === 'EBUSY' || error.code === 'EAGAIN')) {
+      // 文件正在被使用，延迟后重试
+      const delay = Math.pow(2, retryCount) * 100; // 指数退避
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return saveJsonFileWithRetry(filePath, data, retryCount + 1);
+    }
     console.error(`Error saving JSON file ${filePath}:`, error);
     throw error;
   }
+}
+
+/**
+ * 保存数据到 JSON 文件（带缓存和批次处理）
+ * @param {string} filePath - 文件路径
+ * @param {*} data - 要保存的数据
+ * @param {boolean} immediate - 是否立即写入
+ */
+export async function saveJsonFile(filePath, data, immediate = false) {
+  if (immediate) {
+    // 立即写入模式
+    if (writeCache.has(filePath)) {
+      const cached = writeCache.get(filePath);
+      clearTimeout(cached.timer);
+      writeCache.delete(filePath);
+    }
+    return saveJsonFileWithRetry(filePath, data);
+  }
+
+  // 延迟写入模式
+  const cached = writeCache.get(filePath);
+
+  if (cached) {
+    // 更新缓存数据并重置定时器
+    clearTimeout(cached.timer);
+    cached.data = data;
+    cached.dirty = true;
+  } else {
+    // 创建新缓存项
+    writeCache.set(filePath, {
+      data,
+      dirty: true,
+      timer: null
+    });
+  }
+
+  // 设置延迟写入定时器
+  const cacheEntry = writeCache.get(filePath);
+  cacheEntry.timer = setTimeout(async () => {
+    if (cacheEntry.dirty) {
+      try {
+        await saveJsonFileWithRetry(filePath, cacheEntry.data);
+        cacheEntry.dirty = false;
+      } catch (error) {
+        console.error(`Failed to flush write cache for ${filePath}:`, error);
+      }
+    }
+    writeCache.delete(filePath);
+  }, WRITE_DELAY_MS);
+}
+
+/**
+ * 刷新所有待写入的缓存（用于优雅关机）
+ */
+export async function flushAllWrites() {
+  const flushPromises = [];
+
+  for (const [filePath, cached] of writeCache.entries()) {
+    if (cached.dirty) {
+      clearTimeout(cached.timer);
+      flushPromises.push(
+        saveJsonFileWithRetry(filePath, cached.data)
+          .catch(error => {
+            console.error(`Error flushing ${filePath}:`, error);
+          })
+      );
+    } else {
+      clearTimeout(cached.timer);
+    }
+  }
+
+  await Promise.all(flushPromises);
+  writeCache.clear();
 }
 
 function stripEphemeralFields(object) {

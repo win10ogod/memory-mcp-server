@@ -69,6 +69,13 @@ Add to your Claude Desktop configuration file:
 
 Configure according to your client's MCP server setup instructions, pointing to `src/index.js`.
 
+## MCP Features
+
+This server implements the full Model Context Protocol specification with:
+- **Tools**: 13 tools for memory management
+- **Resources**: 4 resources for system inspection
+- **Prompts**: 4 prompt templates for common memory tasks
+
 ## Available Tools
 
 ### Short-term Memory Tools
@@ -196,6 +203,99 @@ Get creation and update context of a specific memory.
 - `name` (string): Memory name to inspect
 - `conversation_id` (string, optional): Conversation ID that owns the memory
 
+## Available Resources
+
+MCP resources allow AI to inspect the memory system state:
+
+### `memory://stats/overview`
+System-wide overview and health status.
+
+**Returns:**
+- Total conversation count
+- System health status
+- Available features
+
+### `memory://conversations/list`
+List all conversations with memory statistics.
+
+**Returns:**
+- Conversation IDs
+- Short-term memory counts
+- Long-term memory counts
+
+### `memory://stats/conversation/{id}`
+Detailed statistics for a specific conversation.
+
+**Parameters:**
+- `{id}`: Conversation ID to inspect
+
+**Returns:**
+- Short-term memory: total, scores, age ranges
+- Long-term memory: total, update counts, timestamps
+
+### `memory://guide/best-practices`
+Comprehensive guide on using the memory system effectively.
+
+**Returns:**
+- Best practices for short-term and long-term memory
+- Trigger condition examples
+- Multimodal support guidelines
+- Common usage patterns
+
+## Available Prompts
+
+MCP prompts provide guided workflows for common tasks:
+
+### `remember-user-info`
+Store important user information in long-term memory.
+
+**Arguments:**
+- `info_type` (required): Type of information (preference, birthday, fact, etc.)
+- `information` (required): The information to remember
+- `conversation_id` (optional): Target conversation ID
+
+**Guides AI to:**
+1. Create appropriate memory name
+2. Generate relevant trigger conditions
+3. Use add_long_term_memory tool
+
+### `recall-context`
+Search for relevant memories based on current conversation.
+
+**Arguments:**
+- `current_topic` (required): Current topic or question
+- `conversation_id` (optional): Conversation to search
+
+**Guides AI to:**
+1. Search short-term memories for recent context
+2. Search long-term memories for permanent facts
+3. Consider keyword relevance and time decay
+
+### `create-reminder`
+Create a conditional reminder that activates based on context or date.
+
+**Arguments:**
+- `reminder_content` (required): What to remind about
+- `trigger_condition` (required): When to trigger (keywords or date)
+- `conversation_id` (optional): Target conversation
+
+**Guides AI to:**
+1. Convert natural language conditions to JavaScript
+2. Create date-based or keyword-based triggers
+3. Use add_long_term_memory with proper trigger
+
+### `analyze-conversation`
+Analyze conversation history and suggest what should be remembered.
+
+**Arguments:**
+- `conversation_id` (required): Conversation to analyze
+
+**Guides AI to:**
+1. Get current memory statistics
+2. Identify important information types
+3. Categorize for short-term vs long-term storage
+4. Create appropriate memory entries
+
 ## Architecture
 
 ```
@@ -205,15 +305,23 @@ memory-mcp-server/
 │   ├── memory/
 │   │   ├── short-term.js        # Short-term memory logic
 │   │   ├── long-term.js         # Long-term memory logic
-│   │   └── storage.js           # JSON file storage
+│   │   ├── storage.js           # JSON file storage with caching
+│   │   └── modalities.js        # Multimodal attachment handling
 │   ├── nlp/
 │   │   ├── jieba.js             # Chinese segmentation
 │   │   └── keywords.js          # Keyword matching
 │   ├── triggers/
-│   │   └── matcher.js           # JS code execution sandbox
-│   └── tools/
-│       ├── short-term-tools.js  # Short-term MCP tools
-│       └── long-term-tools.js   # Long-term MCP tools
+│   │   └── matcher.js           # JS code execution sandbox (Node.js vm)
+│   ├── tools/
+│   │   ├── short-term-tools.js  # Short-term MCP tools
+│   │   └── long-term-tools.js   # Long-term MCP tools
+│   ├── resources/
+│   │   └── index.js             # MCP resources (stats, guides)
+│   ├── prompts/
+│   │   └── index.js             # MCP prompts (workflows)
+│   └── utils/
+│       ├── lru-cache.js         # LRU cache for managers
+│       └── zod-to-json-schema.js
 └── data/                        # Memory storage (auto-created)
     └── {conversation_id}/
         ├── short-term-memory.json
@@ -263,19 +371,28 @@ npm start
 
 ## Security
 
-- **Sandboxed Execution**: Long-term memory triggers run in vm2 sandbox with timeout protection
+- **Sandboxed Execution**: Long-term memory triggers run in Node.js built-in `vm` module sandbox with timeout protection
 - **No File System Access**: Trigger code cannot access filesystem (sandboxed)
 - **No Network Access**: Trigger code cannot make network requests
 - **Timeout Protection**: 1-second execution timeout prevents infinite loops
+- **Secure Context**: Only safe built-in objects are exposed to trigger code
 
-> **Note**: vm2 provides good security for most use cases. For maximum security in production environments, consider running the MCP server in a containerized environment with additional restrictions.
+> **Note**: The built-in `vm` module provides good isolation for most use cases. For maximum security in production environments, consider running the MCP server in a containerized environment with additional restrictions.
 
 ## Limitations
 
 - Memory storage is file-based (JSON), suitable for moderate usage
 - Trigger execution has 1-second timeout
-- Each isolated VM has 32MB memory limit
+- Manager instances cached with LRU (max 100 conversations, 30-min idle timeout)
 - Chinese text processing optimized (may be less optimal for other languages)
+
+## Performance Optimizations
+
+- **Write Caching**: Delayed writes with 1-second batching to reduce disk I/O
+- **Directory Caching**: Directory existence checks are cached to avoid repeated file system calls
+- **LRU Manager Cache**: Automatic cleanup of inactive conversation managers prevents memory leaks
+- **Retry Logic**: File operations automatically retry with exponential backoff on transient errors
+- **Graceful Shutdown**: Pending writes are flushed and resources cleaned up on shutdown signals
 
 ## License
 
