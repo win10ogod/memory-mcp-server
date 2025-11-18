@@ -15,22 +15,42 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 
 import { ShortTermMemoryManager } from './memory/short-term.js';
 import { LongTermMemoryManager } from './memory/long-term.js';
 import { StorageManager, flushAllWrites } from './memory/storage.js';
 import { createShortTermTools } from './tools/short-term-tools.js';
 import { createLongTermTools } from './tools/long-term-tools.js';
+import { createBackupTools } from './tools/backup-tools.js';
+import { createSearchTools } from './tools/search-tools.js';
 import { zodToJsonSchema } from './utils/zod-to-json-schema.js';
 import { LRUCache } from './utils/lru-cache.js';
+import { QueryCache } from './utils/query-cache.js';
+import { withTimeout, TIMEOUT_CONFIG } from './utils/timeout.js';
 import { createResources } from './resources/index.js';
 import { createPrompts } from './prompts/index.js';
+import { createLogger } from './utils/logger.js';
+import { globalMetrics } from './monitoring/metrics.js';
+import { createHealthChecker } from './health/index.js';
+import { globalRateLimiter } from './security/rate-limiter.js';
+import { globalAuditLogger } from './security/audit-log.js';
+import { validateConversationId } from './security/input-validator.js';
+
+// 創建日誌記錄器
+const logger = createLogger('mcp-server');
 
 // 使用 LRU 缓存管理器实例，防止内存泄漏
 // 最多缓存 100 个对话，30 分钟未使用自动清理
 const shortTermManagers = new LRUCache(100, 30 * 60 * 1000);
 const longTermManagers = new LRUCache(100, 30 * 60 * 1000);
 const storageManagers = new LRUCache(100, 30 * 60 * 1000);
+
+// 查詢緩存實例
+const queryCache = new QueryCache(50, 5 * 60 * 1000);
+
+// 健康檢查器
+let healthChecker = null;
 
 // 定期清理过期的管理器
 setInterval(() => {
@@ -137,6 +157,53 @@ async function createServer() {
   const longTermTools = createLongTermTools(defaultLongTermManager, defaultStorageManager);
   longTermTools.forEach(tool => registerTool(tool, 'long-term'));
 
+  // 註冊備份與還原工具
+  const backupTools = createBackupTools(getShortTermManager, getLongTermManager, getStorageManager);
+  backupTools.forEach(tool => registerTool(tool, 'backup'));
+
+  // 註冊高級搜索工具
+  const searchTools = createSearchTools(getShortTermManager, getLongTermManager);
+  searchTools.forEach(tool => registerTool(tool, 'search'));
+
+  // 註冊健康檢查工具
+  registerTool({
+    name: 'health_check',
+    description: '獲取服務器健康狀態和性能指標',
+    inputSchema: z.object({
+      detailed: z.boolean().default(false).describe('是否返回詳細報告')
+    }),
+    scope: 'system',
+    async handler(args) {
+      if (args.detailed) {
+        return await healthChecker.getHealthReport();
+      } else {
+        return await healthChecker.getSimpleHealth();
+      }
+    }
+  }, 'system');
+
+  // 註冊性能指標工具
+  registerTool({
+    name: 'get_metrics',
+    description: '獲取服務器性能指標',
+    inputSchema: z.object({}),
+    scope: 'system',
+    async handler() {
+      return globalMetrics.getMetrics();
+    }
+  }, 'system');
+
+  // 註冊查詢緩存統計工具
+  registerTool({
+    name: 'get_cache_stats',
+    description: '獲取查詢緩存統計信息',
+    inputSchema: z.object({}),
+    scope: 'system',
+    async handler() {
+      return queryCache.getStats();
+    }
+  }, 'system');
+
   // 創建 Resources 和 Prompts 處理器
   const { resources, readResource } = createResources(
     getShortTermManager,
@@ -144,6 +211,12 @@ async function createServer() {
     getStorageManager
   );
   const { prompts, getPrompt } = createPrompts();
+
+  // 初始化健康檢查器
+  healthChecker = createHealthChecker(
+    { shortTerm: shortTermManagers, longTerm: longTermManagers, storage: storageManagers },
+    globalMetrics
+  );
 
   // 处理 list_tools 请求
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -159,93 +232,143 @@ async function createServer() {
   // 处理 call_tool 请求
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const toolName = request.params.name;
-    const toolDef = toolRegistry.get(toolName);
-
-    if (!toolDef) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Unknown tool: ${toolName}`
-          }
-        ],
-        isError: true
-      };
-    }
+    const startTime = Date.now();
+    let conversationId = 'unknown';
+    let success = false;
+    let result = null;
+    let error = null;
 
     try {
+      const toolDef = toolRegistry.get(toolName);
+
+      if (!toolDef) {
+        throw new Error(`Unknown tool: ${toolName}`);
+      }
+
       // 验证参数
       const validatedArgs = toolDef.inputSchema.parse(request.params.arguments);
 
-      // 如果工具需要特定的 conversation_id，获取对应的管理器
-      const conversationId = validatedArgs.conversation_id || defaultConversationId;
+      // 驗證並清理 conversation_id
+      conversationId = validatedArgs.conversation_id || defaultConversationId;
+      try {
+        validateConversationId(conversationId);
+      } catch (validationError) {
+        await globalAuditLogger.logValidationError({
+          conversationId,
+          toolName,
+          field: 'conversation_id',
+          error: validationError
+        });
+        throw validationError;
+      }
 
+      // 檢查速率限制
+      const rateLimitResult = globalRateLimiter.checkLimit(conversationId, toolName);
+      if (!rateLimitResult.allowed) {
+        await globalAuditLogger.logRateLimitExceeded({
+          conversationId,
+          toolName,
+          limit: globalRateLimiter.maxRequests,
+          current: globalRateLimiter.maxRequests
+        });
+        throw new Error(rateLimitResult.reason);
+      }
+
+      logger.debug('Tool call started', { toolName, conversationId });
+
+      // 執行工具（帶超時）
       const toolScope = toolDef.scope;
+      const timeout = TIMEOUT_CONFIG.SEARCH || 5000;
 
       let manager, storage;
       if (toolScope === 'short-term' || toolName.includes('short_term')) {
         manager = await getShortTermManager(conversationId);
         storage = getStorageManager(conversationId);
-        // 重新创建工具以使用正确的管理器
-        const tools = createShortTermTools(manager, storage);
+        const tools = createShortTermTools(manager, storage, queryCache);
         const tool = tools.find(t => t.name === toolName);
-        const result = await tool.handler(validatedArgs);
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        result = await withTimeout(tool.handler(validatedArgs), timeout, `Tool ${toolName} timeout`);
       } else if (toolScope === 'long-term' || toolName.includes('long_term')) {
         manager = await getLongTermManager(conversationId);
         storage = getStorageManager(conversationId);
-        // 重新创建工具以使用正确的管理器
         const tools = createLongTermTools(manager, storage);
         const tool = tools.find(t => t.name === toolName);
-        const result = await tool.handler(validatedArgs);
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        result = await withTimeout(tool.handler(validatedArgs), timeout, `Tool ${toolName} timeout`);
+      } else if (toolScope === 'backup') {
+        const tools = createBackupTools(getShortTermManager, getLongTermManager, getStorageManager);
+        const tool = tools.find(t => t.name === toolName);
+        result = await withTimeout(tool.handler(validatedArgs), TIMEOUT_CONFIG.BACKUP, `Tool ${toolName} timeout`);
+      } else if (toolScope === 'search') {
+        const tools = createSearchTools(getShortTermManager, getLongTermManager);
+        const tool = tools.find(t => t.name === toolName);
+        result = await withTimeout(tool.handler(validatedArgs), timeout, `Tool ${toolName} timeout`);
       } else {
-        // 对于其他工具，直接调用
-        const result = await toolDef.handler(validatedArgs);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
+        // 系統工具或其他工具
+        result = await withTimeout(toolDef.handler(validatedArgs), timeout, `Tool ${toolName} timeout`);
       }
-    } catch (error) {
-      if (error.name === 'ZodError') {
+
+      success = true;
+      const duration = Date.now() - startTime;
+
+      // 記錄成功的審計日誌
+      await globalAuditLogger.logToolCall({
+        conversationId,
+        toolName,
+        success: true,
+        args: validatedArgs,
+        result,
+        duration
+      });
+
+      // 記錄性能指標
+      globalMetrics.recordRequest({ duration, success: true, toolName, conversationId });
+
+      logger.info('Tool call completed', { toolName, conversationId, duration });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (err) {
+      error = err;
+      const duration = Date.now() - startTime;
+
+      // 記錄失敗的審計日誌
+      await globalAuditLogger.logToolCall({
+        conversationId,
+        toolName,
+        success: false,
+        args: request.params.arguments,
+        error: err,
+        duration
+      });
+
+      // 記錄性能指標
+      globalMetrics.recordRequest({ duration, success: false, toolName, conversationId, error: err });
+
+      logger.error('Tool call failed', { toolName, conversationId, error: err.message, duration });
+
+      // 處理不同類型的錯誤
+      if (err.name === 'ZodError') {
         return {
           content: [
             {
               type: 'text',
-              text: `Invalid arguments: ${JSON.stringify(error.errors, null, 2)}`
+              text: `Invalid arguments: ${JSON.stringify(err.errors, null, 2)}`
             }
           ],
           isError: true
         };
       }
 
-      console.error(`Error executing tool ${toolName}:`, error);
       return {
         content: [
           {
             type: 'text',
-            text: `Error: ${error.message}`
+            text: `Error: ${err.message}`
           }
         ],
         isError: true
@@ -294,23 +417,35 @@ async function createServer() {
  * 优雅关机处理
  */
 async function gracefulShutdown(signal) {
-  console.error(`\n[${signal}] Shutting down gracefully...`);
+  logger.info(`Shutting down gracefully`, { signal });
 
   try {
     // 刷新所有待写入的数据
-    console.error('[Shutdown] Flushing pending writes...');
+    logger.info('Flushing pending writes');
     await flushAllWrites();
 
+    // 刷新審計日誌
+    logger.info('Flushing audit logs');
+    await globalAuditLogger.stop();
+
+    // 停止速率限制器
+    logger.info('Stopping rate limiter');
+    globalRateLimiter.stop();
+
+    // 清理緩存
+    logger.info('Clearing caches');
+    queryCache.clear();
+
     // 清理管理器缓存
-    console.error('[Shutdown] Clearing manager caches...');
+    logger.info('Clearing manager caches');
     shortTermManagers.clear();
     longTermManagers.clear();
     storageManagers.clear();
 
-    console.error('[Shutdown] Cleanup complete');
+    logger.info('Shutdown complete');
     process.exit(0);
   } catch (error) {
-    console.error('[Shutdown] Error during shutdown:', error);
+    logger.error('Error during shutdown', { error: error.message });
     process.exit(1);
   }
 }
@@ -325,8 +460,18 @@ async function main() {
 
     await server.connect(transport);
 
-    console.error('Memory MCP Server running on stdio');
-    console.error('Server initialized with short-term and long-term memory capabilities');
+    logger.info('Memory MCP Server running on stdio');
+    logger.info('Server initialized with enhanced capabilities', {
+      features: [
+        'Short-term and long-term memory management',
+        'Query result caching',
+        'Rate limiting and security',
+        'Health monitoring and metrics',
+        'Backup and restore',
+        'Advanced search',
+        'Audit logging'
+      ]
+    });
 
     // 注册优雅关机处理器
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
